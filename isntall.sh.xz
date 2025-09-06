@@ -1,0 +1,289 @@
+#!/bin/bash
+
+# Script Otomatisasi Instalasi Aplikasi tar.xz untuk Arch Linux
+# Dibuat untuk mempermudah instalasi aplikasi dari file tar.xz
+
+set -e  # Exit jika ada error
+
+# Warna untuk output yang lebih menarik
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Fungsi untuk print dengan warna
+print_info() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+print_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# Fungsi untuk validasi file
+validate_file() {
+    local file_path="$1"
+    
+    if [[ ! -f "$file_path" ]]; then
+        print_error "File '$file_path' tidak ditemukan!"
+        return 1
+    fi
+    
+    if [[ ! "$file_path" =~ \.tar\.xz$ ]]; then
+        print_error "File harus berformat .tar.xz!"
+        return 1
+    fi
+    
+    print_success "File '$file_path' valid"
+    return 0
+}
+
+# Fungsi untuk mendapatkan nama aplikasi dari archive
+get_app_name() {
+    local file_path="$1"
+    local app_name
+    
+    # Cek struktur archive untuk mendapatkan nama folder utama
+    app_name=$(tar -tf "$file_path" | head -1 | cut -d'/' -f1)
+    echo "$app_name"
+}
+
+# Fungsi untuk mendapatkan nama executable
+find_executable() {
+    local install_path="$1"
+    local app_name="$2"
+    
+    # Cari file executable yang mungkin
+    local possible_execs=(
+        "$install_path/$app_name"
+        "$install_path/bin/$app_name"
+        "$install_path/${app_name,,}"  # lowercase
+        "$install_path/$(basename "$app_name" | cut -d'-' -f1)"
+    )
+    
+    for exec_file in "${possible_execs[@]}"; do
+        if [[ -x "$exec_file" ]]; then
+            echo "$exec_file"
+            return 0
+        fi
+    done
+    
+    # Jika tidak ditemukan, cari file executable apapun
+    find "$install_path" -type f -executable 2>/dev/null | head -1
+}
+
+# Fungsi untuk membuat desktop entry
+create_desktop_entry() {
+    local app_name="$1"
+    local exec_path="$2"
+    local install_path="$3"
+    local display_name="$4"
+    local description="$5"
+    
+    local desktop_file="/usr/share/applications/${app_name,,}.desktop"
+    local icon_path=""
+    
+    # Cari icon
+    local possible_icons=(
+        "$install_path/icon.png"
+        "$install_path/icons/icon.png"
+        "$install_path/browser/chrome/icons/default/default128.png"
+        "$install_path/resources/icon.png"
+        "$install_path/share/icons/hicolor/128x128/apps/${app_name,,}.png"
+    )
+    
+    for icon in "${possible_icons[@]}"; do
+        if [[ -f "$icon" ]]; then
+            icon_path="$icon"
+            break
+        fi
+    done
+    
+    # Jika tidak ada icon khusus, gunakan icon generic
+    if [[ -z "$icon_path" ]]; then
+        icon_path="application-x-executable"
+    fi
+    
+    print_info "Membuat desktop entry..."
+    
+    sudo tee "$desktop_file" > /dev/null <<EOF
+[Desktop Entry]
+Name=$display_name
+Comment=$description
+Exec=$exec_path
+Icon=$icon_path
+Terminal=false
+Type=Application
+Categories=Application;
+StartupNotify=true
+EOF
+    
+    sudo chmod 644 "$desktop_file"
+    print_success "Desktop entry dibuat: $desktop_file"
+}
+
+# Fungsi untuk instalasi utama
+install_application() {
+    local file_path="$1"
+    local target_dir="/opt"
+    
+    print_info "Memulai instalasi aplikasi..."
+    
+    # Dapatkan nama aplikasi dari archive
+    local app_name=$(get_app_name "$file_path")
+    local install_path="$target_dir/$app_name"
+    
+    print_info "Nama aplikasi: $app_name"
+    print_info "Lokasi instalasi: $install_path"
+    
+    # Ekstrak archive
+    print_info "Mengekstrak archive..."
+    sudo tar -xf "$file_path" -C "$target_dir/"
+    print_success "Archive berhasil diekstrak"
+    
+    # Set permissions
+    print_info "Mengatur permissions..."
+    sudo chown -R root:root "$install_path"
+    sudo chmod -R 755 "$install_path"
+    print_success "Permissions berhasil diatur"
+    
+    # Cari executable
+    print_info "Mencari file executable..."
+    local exec_path=$(find_executable "$install_path" "$app_name")
+    
+    if [[ -z "$exec_path" ]]; then
+        print_warning "Executable tidak ditemukan otomatis"
+        echo -n "Masukkan path executable manual (dari $install_path): "
+        read -r manual_exec
+        exec_path="$install_path/$manual_exec"
+        
+        if [[ ! -x "$exec_path" ]]; then
+            print_error "File executable tidak valid!"
+            return 1
+        fi
+    fi
+    
+    print_success "Executable ditemukan: $exec_path"
+    
+    # Input untuk desktop entry
+    echo
+    print_info "Konfigurasi Desktop Entry:"
+    echo -n "Nama tampilan aplikasi [$app_name]: "
+    read -r display_name
+    display_name=${display_name:-$app_name}
+    
+    echo -n "Deskripsi aplikasi [Application]: "
+    read -r description
+    description=${description:-"Application"}
+    
+    # Buat desktop entry
+    create_desktop_entry "$app_name" "$exec_path" "$install_path" "$display_name" "$description"
+    
+    # Buat symbolic link
+    local symlink_name="${app_name,,}"
+    print_info "Membuat symbolic link..."
+    
+    if sudo ln -sf "$exec_path" "/usr/local/bin/$symlink_name" 2>/dev/null; then
+        print_success "Symbolic link dibuat: /usr/local/bin/$symlink_name"
+    else
+        print_warning "Gagal membuat symbolic link (mungkin sudah ada)"
+    fi
+    
+    echo
+    print_success "=== INSTALASI SELESAI ==="
+    print_info "Aplikasi: $display_name"
+    print_info "Lokasi: $install_path"
+    print_info "Command: $symlink_name"
+    print_info "Desktop entry: Cek di menu aplikasi"
+}
+
+# Main script
+main() {
+    echo -e "${BLUE}"
+    echo "╔══════════════════════════════════════════╗"
+    echo "║     Instalasi Otomatis Aplikasi tar.xz  ║"
+    echo "║           untuk Arch Linux              ║"
+    echo "╚══════════════════════════════════════════╝"
+    echo -e "${NC}"
+    
+    # Cek apakah dijalankan sebagai user biasa
+    if [[ $EUID -eq 0 ]]; then
+        print_error "Jangan jalankan script ini sebagai root!"
+        print_info "Gunakan: ./install-tarxz-app.sh"
+        exit 1
+    fi
+    
+    # Input directory
+    echo -n "Masukkan directory file tar.xz [$(pwd)]: "
+    read -r input_dir
+    target_dir=${input_dir:-$(pwd)}
+    
+    # Validasi directory
+    if [[ ! -d "$target_dir" ]]; then
+        print_error "Directory '$target_dir' tidak ditemukan!"
+        exit 1
+    fi
+    
+    cd "$target_dir"
+    print_info "Directory saat ini: $(pwd)"
+    
+    # Tampilkan file tar.xz yang ada
+    echo
+    print_info "File tar.xz yang ditemukan:"
+    local tarxz_files=($(find . -maxdepth 1 -name "*.tar.xz" -type f))
+    
+    if [[ ${#tarxz_files[@]} -eq 0 ]]; then
+        print_warning "Tidak ada file .tar.xz ditemukan di directory ini"
+        echo -n "Masukkan nama file lengkap (dengan path): "
+        read -r file_name
+    elif [[ ${#tarxz_files[@]} -eq 1 ]]; then
+        file_name="${tarxz_files[0]}"
+        print_info "Menggunakan file: $file_name"
+    else
+        for i in "${!tarxz_files[@]}"; do
+            echo "  $((i+1)). ${tarxz_files[$i]}"
+        done
+        echo -n "Pilih file (1-${#tarxz_files[@]}) atau masukkan nama file: "
+        read -r choice
+        
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [[ $choice -ge 1 ]] && [[ $choice -le ${#tarxz_files[@]} ]]; then
+            file_name="${tarxz_files[$((choice-1))]}"
+        else
+            file_name="$choice"
+        fi
+    fi
+    
+    # Validasi file
+    if ! validate_file "$file_name"; then
+        exit 1
+    fi
+    
+    # Konversi ke absolute path
+    file_path=$(realpath "$file_name")
+    
+    # Konfirmasi instalasi
+    echo
+    print_info "File yang akan diinstall: $file_path"
+    echo -n "Lanjutkan instalasi? [Y/n]: "
+    read -r confirm
+    
+    if [[ "$confirm" =~ ^[Nn] ]]; then
+        print_info "Instalasi dibatalkan"
+        exit 0
+    fi
+    
+    # Jalankan instalasi
+    install_application "$file_path"
+}
+
+# Jalankan script utama
+main "$@"
